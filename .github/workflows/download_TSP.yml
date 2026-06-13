@@ -21,10 +21,10 @@ jobs:
       - name: Install dependencies
         run: pip install requests mutagen
 
-      - name: Run downloader (inline)
+      - name: Run downloader (incremental)
         run: |
           python << 'EOF'
-          import os, re, time, mimetypes, threading
+          import os, re, time, mimetypes, json
           import requests
           import xml.etree.ElementTree as ET
           from concurrent.futures import ThreadPoolExecutor
@@ -33,6 +33,7 @@ jobs:
           RSS_URL = "https://www.ximalaya.com/album/19206387.xml"
           UA = {"User-Agent": "Mozilla/5.0"}
           OUT = "pod_TSP怪奇档案"
+          STATE_FILE = os.path.join(OUT, "_state.json")
           NS = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
 
           os.makedirs(OUT, exist_ok=True)
@@ -48,14 +49,37 @@ jobs:
                       if c:
                           f.write(c)
 
+          # ---------- load state ----------
+          if os.path.exists(STATE_FILE):
+              state = json.load(open(STATE_FILE, "r", encoding="utf-8"))
+          else:
+              state = {"last_guid": None}
+
           xml = requests.get(RSS_URL, headers=UA).content
           root = ET.fromstring(xml)
           items = root.findall("./channel/item")
 
-          print("Total:", len(items))
+          # old -> new
+          items = list(reversed(items))
 
-          def worker(i, item):
-              title = item.findtext("itunes:title", namespaces=NS) or item.findtext("title") or f"track_{i}"
+          new_items = []
+          for item in items:
+              guid = item.findtext("guid") or item.findtext("title")
+
+              if state["last_guid"] and guid == state["last_guid"]:
+                  continue
+
+              new_items.append((guid, item))
+
+          if not new_items:
+              print("No new episodes.")
+              exit()
+
+          print("New episodes:", len(new_items))
+
+          # ---------- worker ----------
+          def worker(guid, item):
+              title = item.findtext("itunes:title", namespaces=NS) or item.findtext("title") or "unknown"
               filename = safe(title) + ".m4a"
               path = os.path.join(OUT, filename)
 
@@ -86,8 +110,14 @@ jobs:
                   os.remove(tmp)
 
           with ThreadPoolExecutor(max_workers=8) as pool:
-              pool.map(lambda x: worker(x[0], x[1]), enumerate(items, 1))
+              pool.map(lambda x: worker(x[0], x[1]), new_items)
 
+          # ---------- update state ----------
+          latest_guid = new_items[-1][0]
+          with open(STATE_FILE, "w", encoding="utf-8") as f:
+              json.dump({"last_guid": latest_guid}, f, ensure_ascii=False, indent=2)
+
+          print("UPDATED STATE:", latest_guid)
           print("DONE")
           EOF
 
@@ -96,5 +126,5 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add pod_TSP怪奇档案
-          git commit -m "auto: update podcast files" || echo "no changes"
+          git commit -m "auto: incremental update" || echo "no changes"
           git push
