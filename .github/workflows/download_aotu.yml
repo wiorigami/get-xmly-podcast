@@ -3,7 +3,7 @@ name: Download Ximalaya Podcast
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 1 * * 1"  # 每周一 09:00（中国时间 = UTC+8）
+    - cron: "0 1 * * 1"  # 每周一 09:00（中国时间）
 
 jobs:
   download:
@@ -21,10 +21,10 @@ jobs:
       - name: Install dependencies
         run: pip install requests mutagen
 
-      - name: Run downloader (inline)
+      - name: Run incremental downloader
         run: |
           python << 'EOF'
-          import os, re, time, mimetypes, threading
+          import os, re, json, mimetypes
           import requests
           import xml.etree.ElementTree as ET
           from concurrent.futures import ThreadPoolExecutor
@@ -33,6 +33,7 @@ jobs:
           RSS_URL = "https://www.ximalaya.com/album/19206382.xml"
           UA = {"User-Agent": "Mozilla/5.0"}
           OUT = "pod_凹凸电波"
+          STATE_FILE = os.path.join(OUT, "_state.json")
           NS = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
 
           os.makedirs(OUT, exist_ok=True)
@@ -48,14 +49,36 @@ jobs:
                       if c:
                           f.write(c)
 
+          # load state
+          if os.path.exists(STATE_FILE):
+              state = json.load(open(STATE_FILE, "r", encoding="utf-8"))
+          else:
+              state = {"last_guid": None}
+
           xml = requests.get(RSS_URL, headers=UA).content
           root = ET.fromstring(xml)
           items = root.findall("./channel/item")
 
-          print("Total:", len(items))
+          # newest first
+          items = list(reversed(items))
 
-          def worker(i, item):
-              title = item.findtext("itunes:title", namespaces=NS) or item.findtext("title") or f"track_{i}"
+          new_items = []
+          for item in items:
+              guid = item.findtext("guid") or item.findtext("title")
+
+              if state["last_guid"] and guid == state["last_guid"]:
+                  continue
+
+              new_items.append((guid, item))
+
+          if not new_items:
+              print("No new episodes.")
+              exit()
+
+          print("New episodes:", len(new_items))
+
+          def worker(guid, item):
+              title = item.findtext("itunes:title", namespaces=NS) or item.findtext("title")
               filename = safe(title) + ".m4a"
               path = os.path.join(OUT, filename)
 
@@ -85,10 +108,15 @@ jobs:
                   audio.save()
                   os.remove(tmp)
 
-          with ThreadPoolExecutor(max_workers=8) as pool:
-              pool.map(lambda x: worker(x[0], x[1]), enumerate(items, 1))
+          with ThreadPoolExecutor(max_workers=6) as pool:
+              pool.map(lambda x: worker(x[0], x[1]), new_items)
 
-          print("DONE")
+          # update state (latest episode)
+          latest_guid = new_items[-1][0]
+          with open(STATE_FILE, "w", encoding="utf-8") as f:
+              json.dump({"last_guid": latest_guid}, f)
+
+          print("UPDATED STATE:", latest_guid)
           EOF
 
       - name: Commit files
@@ -96,5 +124,5 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add pod_凹凸电波
-          git commit -m "auto: update podcast files" || echo "no changes"
+          git commit -m "auto: incremental update" || echo "no changes"
           git push
