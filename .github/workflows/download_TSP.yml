@@ -1,9 +1,12 @@
 name: Download Ximalaya Podcast（TSP）
 
+permissions:
+  contents: write   # ✅ 解决 403 必加
+
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 1 * * 1"  # 每周一 09:00（中国时间 = UTC+8）
+    - cron: "0 1 * * 1"  # 周一 09:00 CST
 
 jobs:
   download:
@@ -12,6 +15,8 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # ✅ 解决 rebase/pull 问题必须
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -24,7 +29,7 @@ jobs:
       - name: Run downloader (incremental)
         run: |
           python << 'EOF'
-          import os, re, time, mimetypes, json
+          import os, re, json, mimetypes
           import requests
           import xml.etree.ElementTree as ET
           from concurrent.futures import ThreadPoolExecutor
@@ -49,7 +54,7 @@ jobs:
                       if c:
                           f.write(c)
 
-          # ---------- load state ----------
+          # ---------- state ----------
           if os.path.exists(STATE_FILE):
               state = json.load(open(STATE_FILE, "r", encoding="utf-8"))
           else:
@@ -57,14 +62,11 @@ jobs:
 
           xml = requests.get(RSS_URL, headers=UA).content
           root = ET.fromstring(xml)
-          items = root.findall("./channel/item")
-
-          # old -> new
-          items = list(reversed(items))
+          items = list(reversed(root.findall("./channel/item")))
 
           new_items = []
           for item in items:
-              guid = item.findtext("guid") or item.findtext("title")
+              guid = item.find("enclosure").attrib["url"]  # ✅ 最稳定去重
 
               if state["last_guid"] and guid == state["last_guid"]:
                   continue
@@ -77,7 +79,7 @@ jobs:
 
           print("New episodes:", len(new_items))
 
-          # ---------- worker ----------
+          # ---------- download ----------
           def worker(guid, item):
               title = item.findtext("itunes:title", namespaces=NS) or item.findtext("title") or "unknown"
               filename = safe(title) + ".m4a"
@@ -121,10 +123,15 @@ jobs:
           print("DONE")
           EOF
 
-      - name: Commit files
+      - name: Commit and push (SAFE MODE)
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
+
           git add pod_TSP怪奇档案
+
           git commit -m "auto: incremental update" || echo "no changes"
+
+          git pull --rebase origin main   # ✅ 解决 rejected / non-fast-forward
+
           git push
