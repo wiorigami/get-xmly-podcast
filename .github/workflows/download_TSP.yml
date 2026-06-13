@@ -1,0 +1,100 @@
+name: Download Ximalaya Podcast（TSP）
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 1 * * 1"  # 每周一 09:00（中国时间 = UTC+8）
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests mutagen
+
+      - name: Run downloader (inline)
+        run: |
+          python << 'EOF'
+          import os, re, time, mimetypes, threading
+          import requests
+          import xml.etree.ElementTree as ET
+          from concurrent.futures import ThreadPoolExecutor
+          from mutagen.mp4 import MP4, MP4Cover
+
+          RSS_URL = "https://www.ximalaya.com/album/19206387.xml"
+          UA = {"User-Agent": "Mozilla/5.0"}
+          OUT = "pod_TSP怪奇档案"
+          NS = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd"}
+
+          os.makedirs(OUT, exist_ok=True)
+
+          def safe(s):
+              return re.sub(r'[\\/:*?"<>|]', '_', s).strip()
+
+          def dl(url, path):
+              r = requests.get(url, headers=UA, stream=True, timeout=60)
+              r.raise_for_status()
+              with open(path, "wb") as f:
+                  for c in r.iter_content(1024 * 64):
+                      if c:
+                          f.write(c)
+
+          xml = requests.get(RSS_URL, headers=UA).content
+          root = ET.fromstring(xml)
+          items = root.findall("./channel/item")
+
+          print("Total:", len(items))
+
+          def worker(i, item):
+              title = item.findtext("itunes:title", namespaces=NS) or item.findtext("title") or f"track_{i}"
+              filename = safe(title) + ".m4a"
+              path = os.path.join(OUT, filename)
+
+              if os.path.exists(path):
+                  print("[SKIP]", filename)
+                  return
+
+              print("[DL]", title)
+
+              url = item.find("enclosure").attrib["url"]
+              dl(url, path)
+
+              img = item.find("itunes:image", NS)
+              if img is not None:
+                  tmp = os.path.join(OUT, "_cover.tmp")
+                  dl(img.attrib["href"], tmp)
+
+                  audio = MP4(path)
+                  audio["\xa9nam"] = [title]
+
+                  mime = mimetypes.guess_type(img.attrib["href"])[0] or "image/jpeg"
+                  fmt = MP4Cover.FORMAT_JPEG if "jpeg" in mime or "jpg" in mime else MP4Cover.FORMAT_PNG
+
+                  with open(tmp, "rb") as f:
+                      audio["covr"] = [MP4Cover(f.read(), imageformat=fmt)]
+
+                  audio.save()
+                  os.remove(tmp)
+
+          with ThreadPoolExecutor(max_workers=8) as pool:
+              pool.map(lambda x: worker(x[0], x[1]), enumerate(items, 1))
+
+          print("DONE")
+          EOF
+
+      - name: Commit files
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add pod_TSP怪奇档案
+          git commit -m "auto: update podcast files" || echo "no changes"
+          git push
