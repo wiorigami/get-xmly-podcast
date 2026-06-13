@@ -1,12 +1,12 @@
 name: Download Ximalaya Podcast（TSP）
 
 permissions:
-  contents: write   # ✅ 解决 403 必加
+  contents: write
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 1 * * 1"  # 周一 09:00 CST
+    - cron: "0 1 * * 1"
 
 jobs:
   download:
@@ -16,7 +16,7 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # ✅ 解决 rebase/pull 问题必须
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -26,7 +26,7 @@ jobs:
       - name: Install dependencies
         run: pip install requests mutagen
 
-      - name: Run downloader (incremental)
+      - name: Run downloader (stable incremental)
         run: |
           python << 'EOF'
           import os, re, json, mimetypes
@@ -54,7 +54,7 @@ jobs:
                       if c:
                           f.write(c)
 
-          # ---------- state ----------
+          # ---------- load state ----------
           if os.path.exists(STATE_FILE):
               state = json.load(open(STATE_FILE, "r", encoding="utf-8"))
           else:
@@ -66,7 +66,7 @@ jobs:
 
           new_items = []
           for item in items:
-              guid = item.find("enclosure").attrib["url"]  # ✅ 最稳定去重
+              guid = item.find("enclosure").attrib["url"]
 
               if state["last_guid"] and guid == state["last_guid"]:
                   continue
@@ -111,7 +111,7 @@ jobs:
                   audio.save()
                   os.remove(tmp)
 
-          with ThreadPoolExecutor(max_workers=8) as pool:
+          with ThreadPoolExecutor(max_workers=6) as pool:
               pool.map(lambda x: worker(x[0], x[1]), new_items)
 
           # ---------- update state ----------
@@ -123,15 +123,21 @@ jobs:
           print("DONE")
           EOF
 
-      - name: Commit and push (SAFE MODE)
+      - name: Commit safely (anti-RPC-fail)
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
-          git add pod_TSP怪奇档案
+          # 避免一次 commit 太大导致 RPC fail
+          git add pod_TSP怪奇档案/*.m4a || true
+          git add pod_TSP怪奇档案/*.json || true
 
           git commit -m "auto: incremental update" || echo "no changes"
 
-          git pull --rebase origin main   # ✅ 解决 rejected / non-fast-forward
+          # 防冲突
+          git pull --rebase origin main || true
+
+          # 防 RPC failed（关键）
+          git config http.postBuffer 524288000
 
           git push
